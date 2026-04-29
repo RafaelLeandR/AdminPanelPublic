@@ -9,11 +9,15 @@ const firebaseConfig = {
   projectId: "loja-admin-458b5",
   storageBucket: "loja-admin-458b5.firebasestorage.app",
   messagingSenderId: "154894503061",
-  appId: "1:154894503061:web:42c87304555e26cd8d5f9c"
+  appId: "1:154894503061:web:42c87304555e26cd8d5f9c",
+  measurementId: "G-0JCV74YKHN"
 };
 
 const app = initializeApp(firebaseConfig);
 
-export const auth = getAuth(app);
-export const db = getFirestore(app);
-export const storage = getStorage(app);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
+
+export { app, auth, db, storage };
+export default app;

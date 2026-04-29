@@ -23,17 +23,23 @@ import {
   Layout,
   CustomRoutes,
   useNotify,
-useRedirect,
-CreateButton,
+  useRedirect,
+  CreateButton,
   AutocompleteInput,
   AutocompleteArrayInput,
   ReferenceInput,
   ReferenceArrayInput,
+  Toolbar,
+  SaveButton,
 } from 'react-admin';
 import { CroppedImageInput, BannerCarouselInput } from './images';
 import imageCompression from 'browser-image-compression';
 import { db, storage } from './firebase';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import {
+  ref,
+  uploadBytesResumable,
+  getDownloadURL,
+} from 'firebase/storage';
 import {
   collection,
   getDocs,
@@ -68,6 +74,10 @@ import {
 } from '@mui/material';
 import CustomAppBar from './CustomAppBar';
 import MinhaContaPage from './MinhaContaPage';
+import {
+  SaveProgressProvider,
+  useSaveProgress,
+} from './globalSave';
 
 const CustomLayout = (props) => <Layout {...props} appBar={CustomAppBar} />;
 
@@ -100,25 +110,57 @@ const productFilters = [
 
 const i18nProvider = polyglotI18nProvider(() => portugueseMessages, 'pt');
 
-const uploadSingleImage = async (file, path) => {
+/* =========================
+   HELPERS DE UPLOAD COM PROGRESSO
+========================= */
+
+const uploadSingleImage = async (file, path, onProgress) => {
   const storageRef = ref(storage, path);
   const optimizedFile = await optimizeImage(file);
 
-  await uploadBytes(storageRef, optimizedFile);
-  const url = await getDownloadURL(storageRef);
+  return new Promise((resolve, reject) => {
+    const uploadTask = uploadBytesResumable(storageRef, optimizedFile);
 
-  return {
-    url,
-    path: storageRef.fullPath,
-  };
+    uploadTask.on(
+      'state_changed',
+      (snapshot) => {
+        const percent =
+          (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+        if (onProgress) onProgress(percent);
+      },
+      (error) => reject(error),
+      async () => {
+        const url = await getDownloadURL(uploadTask.snapshot.ref);
+
+        resolve({
+          url,
+          path: uploadTask.snapshot.ref.fullPath,
+        });
+      }
+    );
+  });
 };
 
-const uploadMultipleImages = async (files, basePath) => {
+const uploadMultipleImages = async (files, basePath, onProgress) => {
+  if (!files || files.length === 0) return [];
+
+  const progressMap = new Array(files.length).fill(0);
+
+  const updateOverallProgress = () => {
+    const total =
+      progressMap.reduce((sum, value) => sum + value, 0) / files.length;
+    if (onProgress) onProgress(total);
+  };
+
   const uploads = await Promise.all(
     files.map(async (file, index) => {
       const fileName = `${Date.now()}-${index}-${file.name}`;
       const fullPath = `${basePath}/${fileName}`;
-      return uploadSingleImage(file, fullPath);
+
+      return uploadSingleImage(file, fullPath, (fileProgress) => {
+        progressMap[index] = fileProgress;
+        updateOverallProgress();
+      });
     })
   );
 
@@ -219,6 +261,47 @@ function ListActionsWithStoreSelector() {
       <StoreSelector />
     </TopToolbar>
   );
+}
+
+/* =========================
+   TOOLBAR COM PROGRESSO
+========================= */
+
+function CustomFormToolbar() {
+  const { saving, progress } = useSaveProgress();
+
+  return (
+    <Toolbar>
+      <SaveButton
+        label={saving ? `Salvando... ${Math.round(progress)}%` : 'Salvar'}
+        disabled={saving}
+      />
+    </Toolbar>
+  );
+}
+
+/* =========================
+   HOOK AUXILIAR DE PROGRESSO
+========================= */
+
+function useSavingWithProgress() {
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
+
+  const runWithProgress = async (message, task) => {
+    try {
+      saveProgress.startSaving(message);
+      const result = await task(saveProgress);
+      saveProgress.updateProgress(100, 'Finalizando...');
+      return result;
+    } catch (error) {
+      saveProgress.failSaving();
+      notify(error?.message || 'Erro ao salvar', { type: 'error' });
+      throw error;
+    }
+  };
+
+  return { runWithProgress };
 }
 
 /* =========================
@@ -387,38 +470,46 @@ const dataProvider = {
   },
 
   create: async (resource, params) => {
-  const data = { ...params.data };
+    const data = { ...params.data };
 
-  if (data.storeId != null) {
-    data.storeId = String(data.storeId);
-  }
-
-  // paginaInicial usa id manual da loja
-  if (resource === 'paginaInicial' && data.id) {
-    await setDoc(doc(db, resource, String(data.id)), data);
-
-    return {
-      data: {
-        id: String(data.id),
-        ...data,
-      },
-    };
-  }
-
-  // sobreNos: só um por loja
-  if (resource === 'sobreNos') {
-    if (!data.storeId) {
-      throw new Error('Selecione uma loja para criar o Sobre nós.');
+    if (data.storeId != null) {
+      data.storeId = String(data.storeId);
     }
 
-    const existingQuery = query(
-      collection(db, 'sobreNos'),
-      where('storeId', '==', String(data.storeId))
-    );
-    const existingSnapshot = await getDocs(existingQuery);
+    if (resource === 'paginaInicial' && data.id) {
+      await setDoc(doc(db, resource, String(data.id)), data);
 
-    if (!existingSnapshot.empty) {
-      throw new Error('Já existe um "Sobre nós" para esta loja.');
+      return {
+        data: {
+          id: String(data.id),
+          ...data,
+        },
+      };
+    }
+
+    if (resource === 'sobreNos') {
+      if (!data.storeId) {
+        throw new Error('Selecione uma loja para criar o Sobre nós.');
+      }
+
+      const existingQuery = query(
+        collection(db, 'sobreNos'),
+        where('storeId', '==', String(data.storeId))
+      );
+      const existingSnapshot = await getDocs(existingQuery);
+
+      if (!existingSnapshot.empty) {
+        throw new Error('Já existe um "Sobre nós" para esta loja.');
+      }
+
+      const docRef = await addDoc(collection(db, resource), data);
+
+      return {
+        data: {
+          id: docRef.id,
+          ...data,
+        },
+      };
     }
 
     const docRef = await addDoc(collection(db, resource), data);
@@ -429,86 +520,35 @@ const dataProvider = {
         ...data,
       },
     };
-  }
+  },
 
-  // categorias, marcas, tags, produtos...
-  const docRef = await addDoc(collection(db, resource), data);
-
-  return {
-    data: {
-      id: docRef.id,
-      ...data,
-    },
-  };
-},
-
-update: async (resource, params) => {
-  try {
-    console.log('UPDATE CHAMADO:', resource, params);
-
-    const docId = String(params.id);
-    const docRef = doc(db, resource, docId);
-
+  update: async (resource, params) => {
+    const docRef = doc(db, resource, String(params.id));
     const data = { ...params.data };
 
     if (data.storeId != null) {
       data.storeId = String(data.storeId);
     }
 
-    Object.keys(data).forEach((key) => {
-      if (data[key] === undefined) {
-        delete data[key];
-      }
-    });
-
-    console.log('DADOS FINAIS UPDATE:', data);
-
-    await setDoc(docRef, data, { merge: true });
-
-    console.log('UPDATE OK:', resource, docId);
+    await updateDoc(docRef, data);
 
     return {
       data: {
-        id: docId,
+        id: String(params.id),
         ...data,
       },
     };
-  } catch (error) {
-    console.error('ERRO NO UPDATE:', error);
-    throw error;
-  }
-},
+  },
 
-updateMany: async (resource, params) => {
-  try {
+  updateMany: async (resource, params) => {
     await Promise.all(
-      params.ids.map(async (id) => {
-        const docRef = doc(db, resource, String(id));
-
-        const data = {
-          ...params.data,
-        };
-
-        if (data.storeId != null) {
-          data.storeId = String(data.storeId);
-        }
-
-        Object.keys(data).forEach((key) => {
-          if (data[key] === undefined) {
-            delete data[key];
-          }
-        });
-
-        await updateDoc(docRef, data);
-      })
+      params.ids.map((id) =>
+        updateDoc(doc(db, resource, String(id)), params.data)
+      )
     );
 
     return { data: params.ids };
-  } catch (error) {
-    console.error('ERRO NO UPDATE MANY:', error);
-    throw error;
-  }
-},
+  },
 
   delete: async (resource, params) => {
     await deleteDoc(doc(db, resource, String(params.id)));
@@ -559,29 +599,37 @@ function StoreFilteredList(props) {
   );
 }
 
-function StoreCreateWrapper({ title, children }) {
+function StoreCreateWrapper({ title, children, transform }) {
   const { selectedStoreId } = useStoreSelector();
 
   if (!selectedStoreId) {
     return <StoreRequiredMessage title="Selecione uma loja antes de criar" />;
   }
 
-  const transform = async (data) => ({
-    ...data,
-    storeId: String(data.storeId || selectedStoreId),
-  });
+  const finalTransform = async (data) => {
+    const baseData = {
+      ...data,
+      storeId: String(data.storeId || selectedStoreId),
+    };
+
+    if (transform) {
+      return transform(baseData);
+    }
+
+    return baseData;
+  };
 
   return (
-    <Create title={title} transform={transform}>
-      <SimpleForm>{children}</SimpleForm>
+    <Create title={title} transform={finalTransform}>
+      <SimpleForm toolbar={<CustomFormToolbar />}>{children}</SimpleForm>
     </Create>
   );
 }
 
-function StoreEditWrapper({ title, children }) {
+function StoreEditWrapper({ title, children, transform }) {
   return (
-    <Edit title={title}>
-      <SimpleForm>{children}</SimpleForm>
+    <Edit title={title} transform={transform}>
+      <SimpleForm toolbar={<CustomFormToolbar />}>{children}</SimpleForm>
     </Edit>
   );
 }
@@ -617,100 +665,122 @@ function PaginaInicialCreate() {
   const notify = useNotify();
   const redirect = useRedirect();
   const { reloadStores, selectedStoreId } = useStoreSelector();
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
 
-  const transform = async (data) => {
-    const lojaId = String(data.id || '').trim();
+  const transform = async (data) =>
+    runWithProgress('Criando loja...', async (progress) => {
+      const lojaId = String(data.id || '').trim();
 
-    let novoIconeLoja = data.iconeLoja || '';
-    let novasImagensCarrossel = data.imagensCarrossel || [];
-    let novasImagensCarrosselLogos = data.imagensCarrosselLogos || [];
+      let novoIconeLoja = data.iconeLoja || '';
+      let novasImagensCarrossel = data.imagensCarrossel || [];
+      let novasImagensCarrosselLogos = data.imagensCarrosselLogos || [];
 
-    // Upload do ícone da loja
-    if (data.iconeLoja?.rawFile) {
-      const file = data.iconeLoja.rawFile;
-      const extension = file.name.split('.').pop();
-      const path = `lojas/${lojaId}/iconeLoja/icone.${extension}`;
-      const uploaded = await uploadSingleImage(file, path);
-      novoIconeLoja = uploaded.url;
-    } else if (data.iconeLoja?.src) {
-      novoIconeLoja = data.iconeLoja.src;
-    } else if (typeof data.iconeLoja === 'string') {
-      novoIconeLoja = data.iconeLoja;
-    } else {
-      novoIconeLoja = '';
-    }
+      progress.updateProgress(5, 'Preparando arquivos...');
 
-    // Upload das imagens do carrossel
-    if (Array.isArray(data.imagensCarrossel)) {
-      const imagensExistentes = data.imagensCarrossel
-        .filter((img) => !img.rawFile)
-        .map((img) => ({
-          src: img.src || img,
-          link: img.link || '',
-        }));
+      if (data.iconeLoja?.rawFile) {
+        const file = data.iconeLoja.rawFile;
+        const extension = file.name.split('.').pop();
+        const path = `lojas/${lojaId}/iconeLoja/icone.${extension}`;
 
-      const novasImagens = data.imagensCarrossel.filter((img) => img.rawFile);
+        const uploaded = await uploadSingleImage(file, path, (fileProgress) => {
+          progress.updateProgress(fileProgress * 0.2, 'Enviando ícone da loja...');
+        });
 
-      if (novasImagens.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          novasImagens.map((img) => img.rawFile),
-          `lojas/${lojaId}/carrossel`
+        novoIconeLoja = uploaded.url;
+      } else if (data.iconeLoja?.src) {
+        novoIconeLoja = data.iconeLoja.src;
+      } else if (typeof data.iconeLoja === 'string') {
+        novoIconeLoja = data.iconeLoja;
+      } else {
+        novoIconeLoja = '';
+      }
+
+      if (Array.isArray(data.imagensCarrossel)) {
+        const imagensExistentes = data.imagensCarrossel
+          .filter((img) => !img.rawFile)
+          .map((img) => ({
+            src: img.src || img,
+            link: img.link || '',
+          }));
+
+        const novasImagens = data.imagensCarrossel.filter((img) => img.rawFile);
+
+        if (novasImagens.length > 0) {
+          const uploaded = await uploadMultipleImages(
+            novasImagens.map((img) => img.rawFile),
+            `lojas/${lojaId}/carrossel`,
+            (multipleProgress) => {
+              progress.updateProgress(
+                20 + multipleProgress * 0.4,
+                'Enviando imagens do carrossel...'
+              );
+            }
+          );
+
+          novasImagensCarrossel = [
+            ...imagensExistentes,
+            ...uploaded.map((item, index) => ({
+              src: item.url,
+              link: novasImagens[index]?.link || '',
+            })),
+          ];
+        } else {
+          novasImagensCarrossel = imagensExistentes;
+        }
+      }
+
+      if (Array.isArray(data.imagensCarrosselLogos)) {
+        const imagensExistentes = data.imagensCarrosselLogos
+          .filter((img) => !img.rawFile)
+          .map((img) => img.src || img);
+
+        const novasImagens = data.imagensCarrosselLogos.filter(
+          (img) => img.rawFile
         );
 
-        novasImagensCarrossel = [
-          ...imagensExistentes,
-          ...uploaded.map((item, index) => ({
-            src: item.url,
-            link: novasImagens[index]?.link || '',
-          })),
-        ];
-      } else {
-        novasImagensCarrossel = imagensExistentes;
+        if (novasImagens.length > 0) {
+          const uploaded = await uploadMultipleImages(
+            novasImagens.map((img) => img.rawFile),
+            `lojas/${lojaId}/carrosselLogos`,
+            (multipleProgress) => {
+              progress.updateProgress(
+                60 + multipleProgress * 0.3,
+                'Enviando logos do carrossel...'
+              );
+            }
+          );
+
+          novasImagensCarrosselLogos = [
+            ...imagensExistentes,
+            ...uploaded.map((item) => item.url),
+          ];
+        } else {
+          novasImagensCarrosselLogos = imagensExistentes;
+        }
       }
-    }
 
-    // Upload das imagens do carrossel de logos
-    if (Array.isArray(data.imagensCarrosselLogos)) {
-      const imagensExistentes = data.imagensCarrosselLogos
-        .filter((img) => !img.rawFile)
-        .map((img) => img.src || img);
+      progress.updateProgress(95, 'Salvando dados da loja...');
 
-      const novasImagens = data.imagensCarrosselLogos.filter(
-        (img) => img.rawFile
-      );
-
-      if (novasImagens.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          novasImagens.map((img) => img.rawFile),
-          `lojas/${lojaId}/carrosselLogos`
-        );
-
-        novasImagensCarrosselLogos = [
-          ...imagensExistentes,
-          ...uploaded.map((item) => item.url),
-        ];
-      } else {
-        novasImagensCarrosselLogos = imagensExistentes;
-      }
-    }
-
-    return {
-      ...data,
-      id: lojaId,
-      storeId: String(data.storeId || selectedStoreId || lojaId || '').trim(),
-      iconeLoja: novoIconeLoja,
-      imagensCarrossel: novasImagensCarrossel,
-      imagensCarrosselLogos: novasImagensCarrosselLogos,
-    };
-  };
+      return {
+        ...data,
+        id: lojaId,
+        storeId: String(data.storeId || selectedStoreId || lojaId || '').trim(),
+        iconeLoja: novoIconeLoja,
+        imagensCarrossel: novasImagensCarrossel,
+        imagensCarrosselLogos: novasImagensCarrosselLogos,
+      };
+    });
 
   const onSuccess = async () => {
+    saveProgress.finishSaving();
     await reloadStores();
     notify('Loja criada com sucesso!');
     redirect('/paginaInicial');
   };
 
   const onError = (error) => {
+    saveProgress.failSaving();
     console.error('ERRO AO CRIAR PÁGINA INICIAL:', error);
     notify(error?.message || 'Erro ao criar loja', { type: 'error' });
   };
@@ -721,7 +791,7 @@ function PaginaInicialCreate() {
       transform={transform}
       mutationOptions={{ onSuccess, onError }}
     >
-      <SimpleForm>
+      <SimpleForm toolbar={<CustomFormToolbar />}>
         <TextInput source="id" label="ID da Loja" fullWidth />
         <TextInput source="nomeLoja" label="Nome da Loja" fullWidth />
         <TextInput source="email" label="E-mail" fullWidth />
@@ -791,96 +861,116 @@ function PaginaInicialCreate() {
 function PaginaInicialEdit() {
   const notify = useNotify();
   const { reloadStores } = useStoreSelector();
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
 
-  const transform = async (data) => {
-    const lojaId = String(data.id || '').trim();
+  const transform = async (data) =>
+    runWithProgress('Atualizando loja...', async (progress) => {
+      const lojaId = data.id;
 
-    let novoIconeLoja = data.iconeLoja;
-    let novasImagensCarrossel = data.imagensCarrossel;
-    let novasImagensCarrosselLogos = data.imagensCarrosselLogos;
+      let novoIconeLoja = data.iconeLoja;
+      let novasImagensCarrossel = data.imagensCarrossel;
+      let novasImagensCarrosselLogos = data.imagensCarrosselLogos;
 
-    // Ícone da loja
-    if (data.iconeLoja?.rawFile) {
-      const file = data.iconeLoja.rawFile;
-      const extension = file.name.split('.').pop();
-      const path = `lojas/${lojaId}/iconeLoja/icone.${extension}`;
-      const uploaded = await uploadSingleImage(file, path);
-      novoIconeLoja = uploaded.url;
-    } else if (data.iconeLoja?.src) {
-      novoIconeLoja = data.iconeLoja.src;
-    } else if (typeof data.iconeLoja === 'string') {
-      novoIconeLoja = data.iconeLoja;
-    }
+      progress.updateProgress(5, 'Preparando arquivos...');
 
-    // Imagens do carrossel
-    if (Array.isArray(data.imagensCarrossel)) {
-      const imagensExistentes = data.imagensCarrossel
-        .filter((img) => !img.rawFile)
-        .map((img) => ({
-          src: img.src || img,
-          link: img.link || '',
-        }));
+      if (data.iconeLoja?.rawFile) {
+        const file = data.iconeLoja.rawFile;
+        const extension = file.name.split('.').pop();
+        const path = `lojas/${lojaId}/iconeLoja/icone.${extension}`;
 
-      const imagensNovas = data.imagensCarrossel.filter((img) => img.rawFile);
+        const uploaded = await uploadSingleImage(file, path, (fileProgress) => {
+          progress.updateProgress(fileProgress * 0.2, 'Enviando ícone da loja...');
+        });
 
-      if (imagensNovas.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          imagensNovas.map((img) => img.rawFile),
-          `lojas/${lojaId}/carrossel`
+        novoIconeLoja = uploaded.url;
+      } else if (data.iconeLoja?.src) {
+        novoIconeLoja = data.iconeLoja.src;
+      }
+
+      if (Array.isArray(data.imagensCarrossel)) {
+        const imagensExistentes = data.imagensCarrossel
+          .filter((img) => !img.rawFile)
+          .map((img) => ({
+            src: img.src || img,
+            link: img.link || '',
+          }));
+
+        const novasImagens = data.imagensCarrossel.filter((img) => img.rawFile);
+
+        if (novasImagens.length > 0) {
+          const uploaded = await uploadMultipleImages(
+            novasImagens.map((img) => img.rawFile),
+            `lojas/${lojaId}/carrossel`,
+            (multipleProgress) => {
+              progress.updateProgress(
+                20 + multipleProgress * 0.4,
+                'Enviando imagens do carrossel...'
+              );
+            }
+          );
+
+          novasImagensCarrossel = [
+            ...imagensExistentes,
+            ...uploaded.map((item, index) => ({
+              src: item.url,
+              link: novasImagens[index]?.link || '',
+            })),
+          ];
+        } else {
+          novasImagensCarrossel = imagensExistentes;
+        }
+      }
+
+      if (Array.isArray(data.imagensCarrosselLogos)) {
+        const imagensExistentes = data.imagensCarrosselLogos
+          .filter((img) => !img.rawFile)
+          .map((img) => img.src || img);
+
+        const novasImagens = data.imagensCarrosselLogos.filter(
+          (img) => img.rawFile
         );
 
-        novasImagensCarrossel = [
-          ...imagensExistentes,
-          ...uploaded.map((item, index) => ({
-            src: item.url,
-            link: imagensNovas[index]?.link || '',
-          })),
-        ];
-      } else {
-        novasImagensCarrossel = imagensExistentes;
+        if (novasImagens.length > 0) {
+          const uploaded = await uploadMultipleImages(
+            novasImagens.map((img) => img.rawFile),
+            `lojas/${lojaId}/carrosselLogos`,
+            (multipleProgress) => {
+              progress.updateProgress(
+                60 + multipleProgress * 0.3,
+                'Enviando logos do carrossel...'
+              );
+            }
+          );
+
+          novasImagensCarrosselLogos = [
+            ...imagensExistentes,
+            ...uploaded.map((item) => item.url),
+          ];
+        } else {
+          novasImagensCarrosselLogos = imagensExistentes;
+        }
       }
-    }
 
-    // Logos do carrossel
-    if (Array.isArray(data.imagensCarrosselLogos)) {
-      const imagensExistentes = data.imagensCarrosselLogos
-        .filter((img) => !img.rawFile)
-        .map((img) => img.src || img);
+      progress.updateProgress(95, 'Salvando alterações da loja...');
 
-      const imagensNovas = data.imagensCarrosselLogos.filter(
-        (img) => img.rawFile
-      );
-
-      if (imagensNovas.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          imagensNovas.map((img) => img.rawFile),
-          `lojas/${lojaId}/carrosselLogos`
-        );
-
-        novasImagensCarrosselLogos = [
-          ...imagensExistentes,
-          ...uploaded.map((item) => item.url),
-        ];
-      } else {
-        novasImagensCarrosselLogos = imagensExistentes;
-      }
-    }
-
-    return {
-      ...data,
-      iconeLoja: novoIconeLoja,
-      imagensCarrossel: novasImagensCarrossel,
-      imagensCarrosselLogos: novasImagensCarrosselLogos,
-    };
-  };
+      return {
+        ...data,
+        iconeLoja: novoIconeLoja,
+        imagensCarrossel: novasImagensCarrossel,
+        imagensCarrosselLogos: novasImagensCarrosselLogos,
+      };
+    });
 
   const onSuccess = async () => {
+    saveProgress.finishSaving();
     await reloadStores();
     notify('Loja atualizada com sucesso!');
   };
 
   const onError = (error) => {
-    console.error('ERRO AO ATUALIZAR PÁGINA INICIAL:', error);
+    saveProgress.failSaving();
+    console.error('ERRO AO EDITAR PÁGINA INICIAL:', error);
     notify(error?.message || 'Erro ao atualizar loja', { type: 'error' });
   };
 
@@ -890,7 +980,7 @@ function PaginaInicialEdit() {
       transform={transform}
       mutationOptions={{ onSuccess, onError }}
     >
-      <SimpleForm>
+      <SimpleForm toolbar={<CustomFormToolbar />}>
         <TextInput source="id" label="ID da Loja" fullWidth disabled />
         <TextInput source="nomeLoja" label="Nome da Loja" fullWidth />
         <TextInput source="email" label="E-mail" fullWidth />
@@ -913,9 +1003,7 @@ function PaginaInicialEdit() {
           label="Whatsapp (ddd e número)"
           fullWidth
         />
-
         <BooleanInput source="entregaGratis" label="Entrega grátis" />
-
         <TextInput
           source="entregaGratisPreco"
           label="Entrega grátis preço"
@@ -927,12 +1015,7 @@ function PaginaInicialEdit() {
           label="Imagens Carrossel"
         />
 
-        <TextInput
-          source="textoCarrossel"
-          label="Texto Carrossel"
-          fullWidth
-        />
-
+        <TextInput source="textoCarrossel" label="Texto Carrossel" fullWidth />
         <TextInput
           source="textoBotaoCarrossel"
           label="Texto botão carrossel"
@@ -975,9 +1058,34 @@ function SobreNosList() {
 }
 
 function SobreNosEdit() {
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
+
+  const transform = async (data) =>
+    runWithProgress('Salvando Sobre nós...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Sobre nós atualizado com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao atualizar Sobre nós', { type: 'error' });
+  };
+
   return (
-    <Edit title="Editar Sobre nós">
-      <SimpleForm>
+    <Edit
+      title="Editar Sobre nós"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
         <Box sx={{ width: '100%', mb: 2 }}>
           <StoreSelector />
         </Box>
@@ -993,6 +1101,9 @@ function SobreNosCreate() {
   const { selectedStoreId, stores } = useStoreSelector();
   const [loadingCheck, setLoadingCheck] = useState(true);
   const [alreadyExists, setAlreadyExists] = useState(false);
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
 
   useEffect(() => {
     const checkExisting = async () => {
@@ -1064,14 +1175,33 @@ function SobreNosCreate() {
 
   const selectedStore = stores.find((store) => store.id === selectedStoreId);
 
-  const transform = async (data) => ({
-    ...data,
-    storeId: String(selectedStoreId),
-  });
+  const transform = async (data) =>
+    runWithProgress('Criando Sobre nós...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return {
+        ...data,
+        storeId: String(selectedStoreId),
+      };
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Sobre nós criado com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao criar Sobre nós', { type: 'error' });
+  };
 
   return (
-    <Create title="Criar Sobre nós" transform={transform}>
-      <SimpleForm>
+    <Create
+      title="Criar Sobre nós"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
         <Box sx={{ width: '100%', mb: 2 }}>
           <StoreSelector />
         </Box>
@@ -1131,42 +1261,70 @@ function ProductList() {
 }
 
 function ProductEdit() {
-  const transform = async (data) => {
-    const productId = data.id;
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
 
-    let novasImagens = data.imagens;
+  const transform = async (data) =>
+    runWithProgress('Atualizando produto...', async (progress) => {
+      const productId = data.id;
+      let novasImagens = data.imagens;
 
-    if (Array.isArray(data.imagens)) {
-      const imagensExistentes = data.imagens
-        .filter((img) => !img.rawFile)
-        .map((img) => img.src || img);
+      progress.updateProgress(5, 'Preparando imagens...');
 
-      const imagensNovas = data.imagens.filter((img) => img.rawFile);
+      if (Array.isArray(data.imagens)) {
+        const imagensExistentes = data.imagens
+          .filter((img) => !img.rawFile)
+          .map((img) => img.src || img);
 
-      if (imagensNovas.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          imagensNovas.map((img) => img.rawFile),
-          `lojas/${data.storeId}/produtos/${productId}`
-        );
+        const imagensNovas = data.imagens.filter((img) => img.rawFile);
 
-        novasImagens = [
-          ...imagensExistentes,
-          ...uploaded.map((item) => item.url),
-        ];
-      } else {
-        novasImagens = imagensExistentes;
+        if (imagensNovas.length > 0) {
+          const uploaded = await uploadMultipleImages(
+            imagensNovas.map((img) => img.rawFile),
+            `lojas/${data.storeId}/produtos/${productId}`,
+            (multipleProgress) => {
+              progress.updateProgress(
+                10 + multipleProgress * 0.8,
+                'Enviando imagens do produto...'
+              );
+            }
+          );
+
+          novasImagens = [
+            ...imagensExistentes,
+            ...uploaded.map((item) => item.url),
+          ];
+        } else {
+          novasImagens = imagensExistentes;
+        }
       }
-    }
 
-    return {
-      ...data,
-      imagens: novasImagens,
-    };
+      progress.updateProgress(95, 'Salvando produto...');
+
+      return {
+        ...data,
+        imagens: novasImagens,
+      };
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Produto atualizado com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao atualizar produto', { type: 'error' });
   };
 
   return (
-    <Edit title="Editar Produto" transform={transform}>
-      <SimpleForm>
+    <Edit
+      title="Editar Produto"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
         <TextInput source="idNome" label="Código de barras" fullWidth />
         <TextInput source="name" label="Nome" fullWidth />
         <TextInput source="preco" label="Preço" fullWidth />
@@ -1221,6 +1379,9 @@ function ProductEdit() {
 
 function ProductCreate() {
   const { selectedStoreId } = useStoreSelector();
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
 
   if (!selectedStoreId) {
     return (
@@ -1228,36 +1389,61 @@ function ProductCreate() {
     );
   }
 
-  const transform = async (data) => {
-    const storeId = String(data.storeId || selectedStoreId);
-    const productId = data.idNome || crypto.randomUUID();
+  const transform = async (data) =>
+    runWithProgress('Criando produto...', async (progress) => {
+      const storeId = String(data.storeId || selectedStoreId);
+      const productId = data.idNome || crypto.randomUUID();
 
-    let imagens = [];
+      let imagens = [];
 
-    if (Array.isArray(data.imagens)) {
-      const novasImagens = data.imagens.filter((img) => img.rawFile);
+      progress.updateProgress(5, 'Preparando imagens...');
 
-      if (novasImagens.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          novasImagens.map((img) => img.rawFile),
-          `lojas/${storeId}/produtos/${productId}`
-        );
-        imagens = uploaded.map((item) => item.url);
+      if (Array.isArray(data.imagens)) {
+        const novasImagens = data.imagens.filter((img) => img.rawFile);
+
+        if (novasImagens.length > 0) {
+          const uploaded = await uploadMultipleImages(
+            novasImagens.map((img) => img.rawFile),
+            `lojas/${storeId}/produtos/${productId}`,
+            (multipleProgress) => {
+              progress.updateProgress(
+                10 + multipleProgress * 0.8,
+                'Enviando imagens do produto...'
+              );
+            }
+          );
+          imagens = uploaded.map((item) => item.url);
+        }
       }
-    }
 
-    return {
-      ...data,
-      idNome: data.idNome,
-      imagens,
-      storeId,
-    };
+      progress.updateProgress(95, 'Salvando produto...');
+
+      return {
+        ...data,
+        idNome: data.idNome,
+        imagens,
+        storeId,
+      };
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Produto criado com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao criar produto', { type: 'error' });
   };
 
   return (
-    <Create title="Criar Produto" transform={transform}>
-      <SimpleForm>
-        <Box sx={{ width: "100%", mb: 2 }}>
+    <Create
+      title="Criar Produto"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
+        <Box sx={{ width: '100%', mb: 2 }}>
           <StoreSelector />
         </Box>
 
@@ -1333,22 +1519,72 @@ function CategoryList() {
 }
 
 function CategoryEdit() {
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
+
+  const transform = async (data) =>
+    runWithProgress('Salvando categoria...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Categoria atualizada com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao atualizar categoria', { type: 'error' });
+  };
+
   return (
-    <StoreEditWrapper title="Editar Categoria">
-      <TextInput source="storeId" label="ID da Loja" fullWidth />
-      <TextInput source="name" label="Nome" fullWidth />
-    </StoreEditWrapper>
+    <Edit
+      title="Editar Categoria"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
+        <TextInput source="storeId" label="ID da Loja" fullWidth />
+        <TextInput source="name" label="Nome" fullWidth />
+      </SimpleForm>
+    </Edit>
   );
 }
 
 function CategoryCreate() {
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
+
+  const transform = async (data) =>
+    runWithProgress('Criando categoria...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Categoria criada com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao criar categoria', { type: 'error' });
+  };
+
   return (
-    <StoreCreateWrapper title="Criar Categoria">
-      <Box sx={{ width: '100%', mb: 2 }}>
-        <StoreSelector />
-      </Box>
-      <TextInput source="storeId" label="ID da Loja" fullWidth />
-      <TextInput source="name" label="Nome" fullWidth />
+    <StoreCreateWrapper title="Criar Categoria" transform={transform}>
+      <SimpleForm toolbar={<CustomFormToolbar />}>
+        <Box sx={{ width: '100%', mb: 2 }}>
+          <StoreSelector />
+        </Box>
+        <TextInput source="storeId" label="ID da Loja" fullWidth />
+        <TextInput source="name" label="Nome" fullWidth />
+      </SimpleForm>
     </StoreCreateWrapper>
   );
 }
@@ -1370,17 +1606,53 @@ function BrandList() {
 }
 
 function BrandEdit() {
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
+
+  const transform = async (data) =>
+    runWithProgress('Salvando marca...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Marca atualizada com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao atualizar marca', { type: 'error' });
+  };
+
   return (
-    <StoreEditWrapper title="Editar Marca">
-      <TextInput source="storeId" label="ID da Loja" fullWidth />
-      <TextInput source="name" label="Nome" fullWidth />
-    </StoreEditWrapper>
+    <Edit
+      title="Editar Marca"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
+        <TextInput source="storeId" label="ID da Loja" fullWidth />
+        <TextInput source="name" label="Nome" fullWidth />
+      </SimpleForm>
+    </Edit>
   );
 }
 
 function BrandCreate() {
+  const { runWithProgress } = useSavingWithProgress();
+
+  const transform = async (data) =>
+    runWithProgress('Criando marca...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
   return (
-    <StoreCreateWrapper title="Criar Marca">
+    <StoreCreateWrapper title="Criar Marca" transform={transform}>
       <Box sx={{ width: '100%', mb: 2 }}>
         <StoreSelector />
       </Box>
@@ -1407,17 +1679,53 @@ function TagList() {
 }
 
 function TagEdit() {
+  const { runWithProgress } = useSavingWithProgress();
+  const saveProgress = useSaveProgress();
+  const notify = useNotify();
+
+  const transform = async (data) =>
+    runWithProgress('Salvando tag...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
+  const onSuccess = () => {
+    saveProgress.finishSaving();
+    notify('Tag atualizada com sucesso!');
+  };
+
+  const onError = (error) => {
+    saveProgress.failSaving();
+    notify(error?.message || 'Erro ao atualizar tag', { type: 'error' });
+  };
+
   return (
-    <StoreEditWrapper title="Editar Tag">
-      <TextInput source="storeId" label="ID da Loja" fullWidth />
-      <TextInput source="name" label="Nome" fullWidth />
-    </StoreEditWrapper>
+    <Edit
+      title="Editar Tag"
+      transform={transform}
+      mutationOptions={{ onSuccess, onError }}
+    >
+      <SimpleForm toolbar={<CustomFormToolbar />}>
+        <TextInput source="storeId" label="ID da Loja" fullWidth />
+        <TextInput source="name" label="Nome" fullWidth />
+      </SimpleForm>
+    </Edit>
   );
 }
 
 function TagCreate() {
+  const { runWithProgress } = useSavingWithProgress();
+
+  const transform = async (data) =>
+    runWithProgress('Criando tag...', async (progress) => {
+      progress.updateProgress(30, 'Validando dados...');
+      progress.updateProgress(90, 'Salvando no banco...');
+      return data;
+    });
+
   return (
-    <StoreCreateWrapper title="Criar Tag">
+    <StoreCreateWrapper title="Criar Tag" transform={transform}>
       <Box sx={{ width: '100%', mb: 2 }}>
         <StoreSelector />
       </Box>
@@ -1448,7 +1756,7 @@ function StoreList() {
 function StoreEdit() {
   return (
     <Edit title="Editar Store">
-      <SimpleForm>
+      <SimpleForm toolbar={<CustomFormToolbar />}>
         <TextInput source="nomeLoja" label="Nome da Loja" fullWidth />
         <TextInput source="email" label="E-mail" fullWidth />
         <TextInput source="telefone" label="Telefone" fullWidth />
@@ -1465,71 +1773,73 @@ function StoreEdit() {
 function AdminApp() {
   return (
     <StoreProvider>
-      <Admin
-        authProvider={authProvider}
-        dataProvider={dataProvider}
-        i18nProvider={i18nProvider}
-        loginPage={MyLoginPage}
-        layout={CustomLayout}
-      >
-        <CustomRoutes>
-          <Route path="/minha-conta" element={<MinhaContaPage />} />
-        </CustomRoutes>
+      <SaveProgressProvider>
+        <Admin
+          authProvider={authProvider}
+          dataProvider={dataProvider}
+          i18nProvider={i18nProvider}
+          loginPage={MyLoginPage}
+          layout={CustomLayout}
+        >
+          <CustomRoutes>
+            <Route path="/minha-conta" element={<MinhaContaPage />} />
+          </CustomRoutes>
 
-        <Resource
-          name="paginaInicial"
-          list={PaginaInicialList}
-          create={PaginaInicialCreate}
-          edit={PaginaInicialEdit}
-          options={{ label: 'Página Inicial - Lojas' }}
-          icon={StoreIcon}
-        />
+          <Resource
+            name="paginaInicial"
+            list={PaginaInicialList}
+            create={PaginaInicialCreate}
+            edit={PaginaInicialEdit}
+            options={{ label: 'Página Inicial - Lojas' }}
+            icon={StoreIcon}
+          />
 
-        <Resource
-          name="sobreNos"
-          list={SobreNosList}
-          edit={SobreNosEdit}
-          create={SobreNosCreate}
-          icon={InfoIcon}
-          options={{ label: 'Sobre nós' }}
-        />
+          <Resource
+            name="sobreNos"
+            list={SobreNosList}
+            edit={SobreNosEdit}
+            create={SobreNosCreate}
+            icon={InfoIcon}
+            options={{ label: 'Sobre nós' }}
+          />
 
-        <Resource
-          name="products"
-          list={ProductList}
-          edit={ProductEdit}
-          create={ProductCreate}
-          icon={InventoryIcon}
-          options={{ label: 'Produtos' }}
-        />
+          <Resource
+            name="products"
+            list={ProductList}
+            edit={ProductEdit}
+            create={ProductCreate}
+            icon={InventoryIcon}
+            options={{ label: 'Produtos' }}
+          />
 
-        <Resource
-          name="categorias"
-          list={CategoryList}
-          edit={CategoryEdit}
-          create={CategoryCreate}
-          icon={CategoryIcon}
-          options={{ label: 'Categorias' }}
-        />
+          <Resource
+            name="categorias"
+            list={CategoryList}
+            edit={CategoryEdit}
+            create={CategoryCreate}
+            icon={CategoryIcon}
+            options={{ label: 'Categorias' }}
+          />
 
-        <Resource
-          name="marcas"
-          list={BrandList}
-          edit={BrandEdit}
-          create={BrandCreate}
-          icon={BrandingWatermarkIcon}
-          options={{ label: 'Marca' }}
-        />
+          <Resource
+            name="marcas"
+            list={BrandList}
+            edit={BrandEdit}
+            create={BrandCreate}
+            icon={BrandingWatermarkIcon}
+            options={{ label: 'Marca' }}
+          />
 
-        <Resource
-          name="tags"
-          list={TagList}
-          edit={TagEdit}
-          create={TagCreate}
-          icon={LocalOfferIcon}
-          options={{ label: 'Tags' }}
-        />
-      </Admin>
+          <Resource
+            name="tags"
+            list={TagList}
+            edit={TagEdit}
+            create={TagCreate}
+            icon={LocalOfferIcon}
+            options={{ label: 'Tags' }}
+          />
+        </Admin>
+      </SaveProgressProvider>
     </StoreProvider>
   );
 }

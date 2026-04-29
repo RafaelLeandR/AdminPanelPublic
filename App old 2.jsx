@@ -442,73 +442,33 @@ const dataProvider = {
   };
 },
 
-update: async (resource, params) => {
-  try {
-    console.log('UPDATE CHAMADO:', resource, params);
-
-    const docId = String(params.id);
-    const docRef = doc(db, resource, docId);
-
+  update: async (resource, params) => {
+    const docRef = doc(db, resource, String(params.id));
     const data = { ...params.data };
 
     if (data.storeId != null) {
       data.storeId = String(data.storeId);
     }
 
-    Object.keys(data).forEach((key) => {
-      if (data[key] === undefined) {
-        delete data[key];
-      }
-    });
-
-    console.log('DADOS FINAIS UPDATE:', data);
-
-    await setDoc(docRef, data, { merge: true });
-
-    console.log('UPDATE OK:', resource, docId);
+    await updateDoc(docRef, data);
 
     return {
       data: {
-        id: docId,
+        id: String(params.id),
         ...data,
       },
     };
-  } catch (error) {
-    console.error('ERRO NO UPDATE:', error);
-    throw error;
-  }
-},
+  },
 
-updateMany: async (resource, params) => {
-  try {
+  updateMany: async (resource, params) => {
     await Promise.all(
-      params.ids.map(async (id) => {
-        const docRef = doc(db, resource, String(id));
-
-        const data = {
-          ...params.data,
-        };
-
-        if (data.storeId != null) {
-          data.storeId = String(data.storeId);
-        }
-
-        Object.keys(data).forEach((key) => {
-          if (data[key] === undefined) {
-            delete data[key];
-          }
-        });
-
-        await updateDoc(docRef, data);
-      })
+      params.ids.map((id) =>
+        updateDoc(doc(db, resource, String(id)), params.data)
+      )
     );
 
     return { data: params.ids };
-  } catch (error) {
-    console.error('ERRO NO UPDATE MANY:', error);
-    throw error;
-  }
-},
+  },
 
   delete: async (resource, params) => {
     await deleteDoc(doc(db, resource, String(params.id)));
@@ -616,16 +576,87 @@ function PaginaInicialList() {
 function PaginaInicialCreate() {
   const notify = useNotify();
   const redirect = useRedirect();
-  const { reloadStores, selectedStoreId } = useStoreSelector();
+  const { reloadStores } = useStoreSelector();
+
+  const transform = async (data) => ({
+  ...data,
+  storeId: String(data.storeId || selectedStoreId),
+});
+
+  const onSuccess = async () => {
+    await reloadStores();
+    notify('Loja criada com sucesso!');
+    redirect('/paginaInicial');
+  };
+
+  return (
+    <Create title="Criar Página Inicial" transform={transform} mutationOptions={{ onSuccess }}>
+      <SimpleForm>
+        <TextInput source="id" label="ID da Loja" fullWidth />
+        <TextInput source="nomeLoja" label="Nome da Loja" fullWidth />
+        <TextInput source="email" label="E-mail" fullWidth />
+        <TextInput source="telefone" label="Telefone" fullWidth />
+        <TextInput source="endereco" label="Endereço" fullWidth />
+
+        <CroppedImageInput
+          source="iconeLoja"
+          label="Ícone da loja"
+          type="logo"
+        />
+
+        <TextInput
+          source="telefoneLigacoes"
+          label="Telefone ligações (ddd e número)"
+          fullWidth
+        />
+        <TextInput
+          source="whatsapp"
+          label="Whatsapp (ddd e número)"
+          fullWidth
+        />
+        <BooleanInput source="entregaGratis" label="Entrega grátis" />
+        <TextInput
+          source="entregaGratisPreco"
+          label="Entrega grátis preço"
+          fullWidth
+        />
+
+        <BannerCarouselInput
+          source="imagensCarrossel"
+          label="Imagens Carrossel"
+        />
+
+        <TextInput source="textoCarrossel" label="Texto Carrossel" fullWidth />
+        <TextInput
+          source="textoBotaoCarrossel"
+          label="Texto botão carrossel"
+          fullWidth
+        />
+
+        <CroppedImageInput
+          source="imagensCarrosselLogos"
+          label="ImgsCarrosselLogos"
+          type="banner"
+          multiple
+        />
+
+        <TextInput source="corDosBotoes" label="Cor dos Botões" type="color" />
+      </SimpleForm>
+    </Create>
+  );
+}
+
+function PaginaInicialEdit() {
+  const notify = useNotify();
+  const { reloadStores } = useStoreSelector();
 
   const transform = async (data) => {
-    const lojaId = String(data.id || '').trim();
+    const lojaId = data.id;
 
-    let novoIconeLoja = data.iconeLoja || '';
-    let novasImagensCarrossel = data.imagensCarrossel || [];
-    let novasImagensCarrosselLogos = data.imagensCarrosselLogos || [];
+    let novoIconeLoja = data.iconeLoja;
+    let novasImagensCarrossel = data.imagensCarrossel;
+    let novasImagensCarrosselLogos = data.imagensCarrosselLogos;
 
-    // Upload do ícone da loja
     if (data.iconeLoja?.rawFile) {
       const file = data.iconeLoja.rawFile;
       const extension = file.name.split('.').pop();
@@ -634,13 +665,8 @@ function PaginaInicialCreate() {
       novoIconeLoja = uploaded.url;
     } else if (data.iconeLoja?.src) {
       novoIconeLoja = data.iconeLoja.src;
-    } else if (typeof data.iconeLoja === 'string') {
-      novoIconeLoja = data.iconeLoja;
-    } else {
-      novoIconeLoja = '';
     }
 
-    // Upload das imagens do carrossel
     if (Array.isArray(data.imagensCarrossel)) {
       const imagensExistentes = data.imagensCarrossel
         .filter((img) => !img.rawFile)
@@ -669,7 +695,6 @@ function PaginaInicialCreate() {
       }
     }
 
-    // Upload das imagens do carrossel de logos
     if (Array.isArray(data.imagensCarrosselLogos)) {
       const imagensExistentes = data.imagensCarrosselLogos
         .filter((img) => !img.rawFile)
@@ -696,178 +721,6 @@ function PaginaInicialCreate() {
 
     return {
       ...data,
-      id: lojaId,
-      storeId: String(data.storeId || selectedStoreId || lojaId || '').trim(),
-      iconeLoja: novoIconeLoja,
-      imagensCarrossel: novasImagensCarrossel,
-      imagensCarrosselLogos: novasImagensCarrosselLogos,
-    };
-  };
-
-  const onSuccess = async () => {
-    await reloadStores();
-    notify('Loja criada com sucesso!');
-    redirect('/paginaInicial');
-  };
-
-  const onError = (error) => {
-    console.error('ERRO AO CRIAR PÁGINA INICIAL:', error);
-    notify(error?.message || 'Erro ao criar loja', { type: 'error' });
-  };
-
-  return (
-    <Create
-      title="Criar Página Inicial"
-      transform={transform}
-      mutationOptions={{ onSuccess, onError }}
-    >
-      <SimpleForm>
-        <TextInput source="id" label="ID da Loja" fullWidth />
-        <TextInput source="nomeLoja" label="Nome da Loja" fullWidth />
-        <TextInput source="email" label="E-mail" fullWidth />
-        <TextInput source="telefone" label="Telefone" fullWidth />
-        <TextInput source="endereco" label="Endereço" fullWidth />
-
-        <CroppedImageInput
-          source="iconeLoja"
-          label="Ícone da loja"
-          type="logo"
-        />
-
-        <TextInput
-          source="telefoneLigacoes"
-          label="Telefone ligações (ddd e número)"
-          fullWidth
-        />
-        <TextInput
-          source="whatsapp"
-          label="Whatsapp (ddd e número)"
-          fullWidth
-        />
-
-        <BooleanInput source="entregaGratis" label="Entrega grátis" />
-
-        <TextInput
-          source="entregaGratisPreco"
-          label="Entrega grátis preço"
-          fullWidth
-        />
-
-        <BannerCarouselInput
-          source="imagensCarrossel"
-          label="Imagens Carrossel"
-        />
-
-        <TextInput
-          source="textoCarrossel"
-          label="Texto Carrossel"
-          fullWidth
-        />
-
-        <TextInput
-          source="textoBotaoCarrossel"
-          label="Texto botão carrossel"
-          fullWidth
-        />
-
-        <CroppedImageInput
-          source="imagensCarrosselLogos"
-          label="ImgsCarrosselLogos"
-          type="banner"
-          multiple
-        />
-
-        <TextInput
-          source="corDosBotoes"
-          label="Cor dos Botões"
-          type="color"
-          fullWidth
-        />
-      </SimpleForm>
-    </Create>
-  );
-}
-
-function PaginaInicialEdit() {
-  const notify = useNotify();
-  const { reloadStores } = useStoreSelector();
-
-  const transform = async (data) => {
-    const lojaId = String(data.id || '').trim();
-
-    let novoIconeLoja = data.iconeLoja;
-    let novasImagensCarrossel = data.imagensCarrossel;
-    let novasImagensCarrosselLogos = data.imagensCarrosselLogos;
-
-    // Ícone da loja
-    if (data.iconeLoja?.rawFile) {
-      const file = data.iconeLoja.rawFile;
-      const extension = file.name.split('.').pop();
-      const path = `lojas/${lojaId}/iconeLoja/icone.${extension}`;
-      const uploaded = await uploadSingleImage(file, path);
-      novoIconeLoja = uploaded.url;
-    } else if (data.iconeLoja?.src) {
-      novoIconeLoja = data.iconeLoja.src;
-    } else if (typeof data.iconeLoja === 'string') {
-      novoIconeLoja = data.iconeLoja;
-    }
-
-    // Imagens do carrossel
-    if (Array.isArray(data.imagensCarrossel)) {
-      const imagensExistentes = data.imagensCarrossel
-        .filter((img) => !img.rawFile)
-        .map((img) => ({
-          src: img.src || img,
-          link: img.link || '',
-        }));
-
-      const imagensNovas = data.imagensCarrossel.filter((img) => img.rawFile);
-
-      if (imagensNovas.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          imagensNovas.map((img) => img.rawFile),
-          `lojas/${lojaId}/carrossel`
-        );
-
-        novasImagensCarrossel = [
-          ...imagensExistentes,
-          ...uploaded.map((item, index) => ({
-            src: item.url,
-            link: imagensNovas[index]?.link || '',
-          })),
-        ];
-      } else {
-        novasImagensCarrossel = imagensExistentes;
-      }
-    }
-
-    // Logos do carrossel
-    if (Array.isArray(data.imagensCarrosselLogos)) {
-      const imagensExistentes = data.imagensCarrosselLogos
-        .filter((img) => !img.rawFile)
-        .map((img) => img.src || img);
-
-      const imagensNovas = data.imagensCarrosselLogos.filter(
-        (img) => img.rawFile
-      );
-
-      if (imagensNovas.length > 0) {
-        const uploaded = await uploadMultipleImages(
-          imagensNovas.map((img) => img.rawFile),
-          `lojas/${lojaId}/carrosselLogos`
-        );
-
-        novasImagensCarrosselLogos = [
-          ...imagensExistentes,
-          ...uploaded.map((item) => item.url),
-        ];
-      } else {
-        novasImagensCarrosselLogos = imagensExistentes;
-      }
-    }
-
-    return {
-      ...data,
       iconeLoja: novoIconeLoja,
       imagensCarrossel: novasImagensCarrossel,
       imagensCarrosselLogos: novasImagensCarrosselLogos,
@@ -879,17 +732,8 @@ function PaginaInicialEdit() {
     notify('Loja atualizada com sucesso!');
   };
 
-  const onError = (error) => {
-    console.error('ERRO AO ATUALIZAR PÁGINA INICIAL:', error);
-    notify(error?.message || 'Erro ao atualizar loja', { type: 'error' });
-  };
-
   return (
-    <Edit
-      title="Editar Página Inicial"
-      transform={transform}
-      mutationOptions={{ onSuccess, onError }}
-    >
+    <Edit title="Editar Página Inicial" transform={transform} mutationOptions={{ onSuccess }}>
       <SimpleForm>
         <TextInput source="id" label="ID da Loja" fullWidth disabled />
         <TextInput source="nomeLoja" label="Nome da Loja" fullWidth />
@@ -913,9 +757,7 @@ function PaginaInicialEdit() {
           label="Whatsapp (ddd e número)"
           fullWidth
         />
-
         <BooleanInput source="entregaGratis" label="Entrega grátis" />
-
         <TextInput
           source="entregaGratisPreco"
           label="Entrega grátis preço"
@@ -927,12 +769,7 @@ function PaginaInicialEdit() {
           label="Imagens Carrossel"
         />
 
-        <TextInput
-          source="textoCarrossel"
-          label="Texto Carrossel"
-          fullWidth
-        />
-
+        <TextInput source="textoCarrossel" label="Texto Carrossel" fullWidth />
         <TextInput
           source="textoBotaoCarrossel"
           label="Texto botão carrossel"
