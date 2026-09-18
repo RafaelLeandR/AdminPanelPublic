@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "loja-admin-458b5"
+  },
+  "targets": {
+    "loja-admin-458b5": {
+      "hosting": {
+        "admin": [
+          "paineladmin22"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

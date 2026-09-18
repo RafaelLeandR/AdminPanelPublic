@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom';
 
 const CustomUserMenu = () => (
   <UserMenu>
-    <Button
+    <Button type="button"
       component={Link}
       to="/minha-conta"
       sx={{ width: '100%', justifyContent: 'flex-start', p: 1.5 }}
@@ -19,7 +19,7 @@ const CustomAppBar = () => (
   <AppBar userMenu={<CustomUserMenu />}>
     <Typography flex="1" variant="h6" id="react-admin-title" />
     <Box sx={{ mr: 2 }}>
-      <Button
+      <Button type="button"
         color="inherit"
         component={Link}
         to="/minha-conta"

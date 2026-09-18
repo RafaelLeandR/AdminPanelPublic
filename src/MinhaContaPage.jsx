@@ -1,4 +1,5 @@
 import * as React from 'react';
+
 import {
   Card,
   CardContent,
@@ -6,122 +7,192 @@ import {
   Box,
   TextField,
   Button,
-  MenuItem,
-  Divider,
+  InputAdornment,
+  IconButton,
 } from '@mui/material';
 
-const lojasMock = [
-  { id: 1, slug: 'minha-loja', nomeLoja: 'Minha Loja' },
-  { id: 2, slug: 'minha-loja-2', nomeLoja: 'Minha Loja 2' },
-];
+import {
+  Visibility,
+  VisibilityOff,
+} from '@mui/icons-material';
+
+import {
+  updatePassword,
+} from 'firebase/auth';
+
+import { auth } from './firebase';
 
 export default function MinhaContaPage() {
-  const [email, setEmail] = React.useState('usuario@email.com');
   const [senha, setSenha] = React.useState('');
-  const [plano, setPlano] = React.useState('basic');
-  const [lojas, setLojas] = React.useState(lojasMock);
+  const [confirmarSenha, setConfirmarSenha] =
+    React.useState('');
 
-  const baseUrl = 'https://meusite.com/loja';
+  const [mostrarSenha, setMostrarSenha] =
+    React.useState(false);
 
-  const handleSlugChange = (index, value) => {
-    const updated = [...lojas];
-    updated[index].slug = value
-      .toLowerCase()
-      .replace(/\s+/g, '-')
-      .replace(/[^a-z0-9-]/g, '');
-    setLojas(updated);
-  };
+  const [loading, setLoading] =
+    React.useState(false);
 
-  const handleSalvar = () => {
-    console.log({
-      email,
-      senha,
-      plano,
-      lojas,
-    });
+  const handleSalvar = async () => {
+    if (!senha || !confirmarSenha) {
+      alert('Preencha todos os campos.');
+      return;
+    }
 
-    alert('Dados salvos com sucesso!');
+    if (senha.length < 6) {
+      alert(
+        'A senha deve ter pelo menos 6 caracteres.'
+      );
+      return;
+    }
+
+    if (senha !== confirmarSenha) {
+      alert('As senhas não coincidem.');
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      const user = auth.currentUser;
+
+      if (!user) {
+        alert('Usuário não autenticado.');
+        return;
+      }
+
+      await updatePassword(user, senha);
+
+      alert('Senha alterada com sucesso!');
+
+      setSenha('');
+      setConfirmarSenha('');
+
+    } catch (error) {
+      console.error(error);
+
+      if (
+        error.code ===
+        'auth/requires-recent-login'
+      ) {
+        alert(
+          'Faça login novamente antes de alterar a senha.'
+        );
+      } else {
+        alert('Erro ao alterar senha.');
+      }
+
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <Box sx={{ maxWidth: 900, margin: '0 auto', p: 3 }}>
+    <Box
+      sx={{
+        maxWidth: 500,
+        margin: '0 auto',
+        p: 3,
+      }}
+    >
       <Card>
         <CardContent>
-          <Typography variant="h5" gutterBottom>
+          <Typography
+            variant="h5"
+            gutterBottom
+          >
             Minha conta
           </Typography>
 
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
-            <TextField
-              label="Alterar e-mail"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              fullWidth
-            />
-
-            <TextField
-              label="Alterar senha"
-              type="password"
-              value={senha}
-              onChange={(e) => setSenha(e.target.value)}
-              fullWidth
-            />
-
-            <TextField
-              select
-              label="Plano"
-              value={plano}
-              onChange={(e) => setPlano(e.target.value)}
-              fullWidth
-            >
-              <MenuItem value="basic">Basic</MenuItem>
-              <MenuItem value="plus">Plus</MenuItem>
-              <MenuItem value="premium">Premium</MenuItem>
-            </TextField>
-          </Box>
-
-          <Divider sx={{ my: 4 }} />
-
-          <Typography variant="h6" gutterBottom>
-            Lojas cadastradas
-          </Typography>
-
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-            {lojas.map((loja, index) => (
-              <Box
-                key={loja.id}
-                sx={{
-                  border: '1px solid #ddd',
-                  borderRadius: 2,
-                  p: 2,
-                }}
-              >
-                <Typography variant="subtitle1">
-                  ID da loja: {loja.id}
-                </Typography>
-
-                <TextField
-                  label="Nome que aparece no link"
-                  value={loja.slug}
-                  onChange={(e) => handleSlugChange(index, e.target.value)}
-                  fullWidth
-                  sx={{ mt: 2 }}
-                />
-
-                <Typography sx={{ mt: 2 }}>
-                  <strong>Link completo:</strong> {baseUrl}/{loja.slug}
-                </Typography>
-              </Box>
-            ))}
-          </Box>
-
-          <Button
-            variant="contained"
-            sx={{ mt: 4 }}
-            onClick={handleSalvar}
+          <Box
+            sx={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2,
+              mt: 2,
+            }}
           >
-            Salvar alterações
-          </Button>
+            <TextField
+              label="Nova senha"
+              type={
+                mostrarSenha
+                  ? 'text'
+                  : 'password'
+              }
+              value={senha}
+              onChange={(e) =>
+                setSenha(e.target.value)
+              }
+              fullWidth
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      onClick={() =>
+                        setMostrarSenha(
+                          !mostrarSenha
+                        )
+                      }
+                      edge="end"
+                    >
+                      {mostrarSenha ? (
+                        <VisibilityOff />
+                      ) : (
+                        <Visibility />
+                      )}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
+            />
+
+            <TextField
+              label="Confirmar senha"
+              type={
+                mostrarSenha
+                  ? 'text'
+                  : 'password'
+              }
+              value={confirmarSenha}
+              onChange={(e) =>
+                setConfirmarSenha(
+                  e.target.value
+                )
+              }
+              fullWidth
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      onClick={() =>
+                        setMostrarSenha(
+                          !mostrarSenha
+                        )
+                      }
+                      edge="end"
+                    >
+                      {mostrarSenha ? (
+                        <VisibilityOff />
+                      ) : (
+                        <Visibility />
+                      )}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
+            />
+
+            <Button
+              type="button"
+              variant="contained"
+              onClick={handleSalvar}
+              disabled={loading}
+            >
+              {loading
+                ? 'Salvando...'
+                : 'Alterar senha'}
+            </Button>
+          </Box>
         </CardContent>
       </Card>
     </Box>
